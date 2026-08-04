@@ -1,102 +1,105 @@
 //+------------------------------------------------------------------+
-//|                                              HSI_LongGridEA.mq4 |
-//|                                  Copyright 2026, Trading Strategy|
+//|                                                HSI_Long_Grid.mq4 |
 //+------------------------------------------------------------------+
-#property copyright "Trading Strategy"
-#property link      ""
-#property version   "1.10"
 #property strict
 
 //--- Input Parameters
-input double   InpLotSize        = 0.02;    // Lot size per order
-input int      InpMaxOrders      = 10;      // Maximum allowed grid orders
-input double   InpGridStepPoints = 50.0;    // Grid step in HSI Index Points (e.g., 50 pts)
-input double   InpBasketProfit   = 5.0;     // Target basket profit in Account Currency ($5)
-input ulong    InpMagicNumber    = 888168;  // EA Magic Number
-
-//+------------------------------------------------------------------+
-//| Expert initialization function                                   |
-//+------------------------------------------------------------------+
-int OnInit()
-{
-   return(INIT_SUCCEEDED);
-}
+input double InpLotSize      = 0.02;       // Lot Size per order
+input int    InpMaxOrders    = 10;         // Maximum number of orders
+input double InpTargetProfit = 5.0;        // Basket Take Profit (Account Currency)
+input int    InpGridStep     = 500;        // Grid Step (in points)
+input int    InpMagicNumber  = 888123;     // Magic Number
+input int    InpSlippage     = 10;         // Slippage (in points)
 
 //+------------------------------------------------------------------+
 //| Expert tick function                                             |
 //+------------------------------------------------------------------+
 void OnTick()
-{
-   int openLongs = 0;
-   double currentProfit = 0.0;
-   double lowestBuyPrice = 999999.0;
-
-   // 1. Scan open positions on current symbol
+  {
+   double totalProfit = 0;
+   int orderCount = 0;
+   double lowestBuyPrice = 0;
+   
+   // 1. Calculate current basket profit and count open orders
    for(int i = OrdersTotal() - 1; i >= 0; i--)
-   {
+     {
       if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
-      {
-         if(OrderSymbol() == Symbol() && OrderMagicNumber() == InpMagicNumber())
-         {
-            if(OrderType() == OP_BUY)
-            {
-               openLongs++;
-               currentProfit += OrderProfit() + OrderSwap() + OrderCommission();
-               if(OrderOpenPrice() < lowestBuyPrice)
-                  lowestBuyPrice = OrderOpenPrice();
-            }
-         }
-      }
-   }
+        {
+         // Filter for this symbol, magic number, and only Buy orders
+         if(OrderSymbol() == Symbol() && OrderMagicNumber() == InpMagicNumber && OrderType() == OP_BUY)
+           {
+            // Include commission and swap in the net profit calculation
+            totalProfit += (OrderProfit() + OrderSwap() + OrderCommission());
+            orderCount++;
+            
+            // Find the lowest buy price (the most recent grid level added)
+            if(lowestBuyPrice == 0 || OrderOpenPrice() < lowestBuyPrice)
+              {
+               lowestBuyPrice = OrderOpenPrice();
+              }
+           }
+        }
+     }
 
-   // 2. Close all if total basket profit hits target ($5.00)
-   if(openLongs > 0 && currentProfit >= InpBasketProfit)
-   {
-      CloseAllLongPositions();
-      return;
-   }
-
-   // 3. Grid Entry Logic for HSI
-   if(openLongs < InpMaxOrders)
-   {
-      // Open initial position
-      if(openLongs == 0)
-      {
-         int ticket = OrderSend(Symbol(), OP_BUY, InpLotSize, Ask, 3, 0, 0, "HSI Grid 1", (int)InpMagicNumber, 0, clrBlue);
-         if(ticket < 0)
-            Print("Error opening initial order: ", GetLastError());
-      }
-      // Open additional grid level when price drops by GridStepPoints (e.g., 50 points)
-      else
-      {
-         if(Ask <= (lowestBuyPrice - (InpGridStepPoints * Point)))
-         {
-            int ticket = OrderSend(Symbol(), OP_BUY, InpLotSize, Ask, 3, 0, 0, "HSI Grid Add", (int)InpMagicNumber, 0, clrBlue);
-            if(ticket < 0)
-               Print("Error opening grid order: ", GetLastError());
-         }
-      }
-   }
-}
+   // 2. Check if profit reached target ($5)
+   if(orderCount > 0 && totalProfit >= InpTargetProfit)
+     {
+      CloseAllOrders();
+      return; // Wait for the next tick to start a new grid
+     }
+     
+   // 3. Open new orders
+   if(orderCount == 0)
+     {
+      // Open initial order if no orders exist
+      OpenBuyOrder();
+     }
+   else if(orderCount < InpMaxOrders)
+     {
+      // Check if price dropped enough to open the next grid level
+      RefreshRates();
+      if(Ask <= (lowestBuyPrice - (InpGridStep * Point)))
+        {
+         OpenBuyOrder();
+        }
+     }
+  }
 
 //+------------------------------------------------------------------+
-//| Close all open long positions for this EA                        |
+//| Function to open a buy order                                     |
 //+------------------------------------------------------------------+
-void CloseAllLongPositions()
-{
+void OpenBuyOrder()
+  {
+   RefreshRates();
+   double ask = MarketInfo(Symbol(), MODE_ASK);
+   int ticket = OrderSend(Symbol(), OP_BUY, InpLotSize, ask, InpSlippage, 0, 0, "HSI Long Grid", InpMagicNumber, 0, clrBlue);
+   
+   if(ticket < 0)
+     {
+      Print("Error opening BUY order: ", GetLastError());
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Function to close all grid orders                                |
+//+------------------------------------------------------------------+
+void CloseAllOrders()
+  {
    for(int i = OrdersTotal() - 1; i >= 0; i--)
-   {
+     {
       if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
-      {
-         if(OrderSymbol() == Symbol() && OrderMagicNumber() == InpMagicNumber())
-         {
-            if(OrderType() == OP_BUY)
-            {
-               bool closed = OrderClose(OrderTicket(), OrderLots(), Bid, 3, clrRed);
-               if(!closed)
-                  Print("Failed to close order #", OrderTicket(), " Error: ", GetLastError());
-            }
-         }
-      }
-   }
-}
+        {
+         if(OrderSymbol() == Symbol() && OrderMagicNumber() == InpMagicNumber && OrderType() == OP_BUY)
+           {
+            RefreshRates();
+            double bid = MarketInfo(Symbol(), MODE_BID);
+            bool res = OrderClose(OrderTicket(), OrderLots(), bid, InpSlippage, clrRed);
+            if(!res)
+              {
+               Print("Error closing order #", OrderTicket(), " : ", GetLastError());
+              }
+           }
+        }
+     }
+  }
+//+------------------------------------------------------------------+
