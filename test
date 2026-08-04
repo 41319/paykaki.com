@@ -1,0 +1,102 @@
+//+------------------------------------------------------------------+
+//|                                              HSI_LongGridEA.mq4 |
+//|                                  Copyright 2026, Trading Strategy|
+//+------------------------------------------------------------------+
+#property copyright "Trading Strategy"
+#property link      ""
+#property version   "1.10"
+#property strict
+
+//--- Input Parameters
+input double   InpLotSize        = 0.02;    // Lot size per order
+input int      InpMaxOrders      = 10;      // Maximum allowed grid orders
+input double   InpGridStepPoints = 50.0;    // Grid step in HSI Index Points (e.g., 50 pts)
+input double   InpBasketProfit   = 5.0;     // Target basket profit in Account Currency ($5)
+input ulong    InpMagicNumber    = 888168;  // EA Magic Number
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   int openLongs = 0;
+   double currentProfit = 0.0;
+   double lowestBuyPrice = 999999.0;
+
+   // 1. Scan open positions on current symbol
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
+      {
+         if(OrderSymbol() == Symbol() && OrderMagicNumber() == InpMagicNumber())
+         {
+            if(OrderType() == OP_BUY)
+            {
+               openLongs++;
+               currentProfit += OrderProfit() + OrderSwap() + OrderCommission();
+               if(OrderOpenPrice() < lowestBuyPrice)
+                  lowestBuyPrice = OrderOpenPrice();
+            }
+         }
+      }
+   }
+
+   // 2. Close all if total basket profit hits target ($5.00)
+   if(openLongs > 0 && currentProfit >= InpBasketProfit)
+   {
+      CloseAllLongPositions();
+      return;
+   }
+
+   // 3. Grid Entry Logic for HSI
+   if(openLongs < InpMaxOrders)
+   {
+      // Open initial position
+      if(openLongs == 0)
+      {
+         int ticket = OrderSend(Symbol(), OP_BUY, InpLotSize, Ask, 3, 0, 0, "HSI Grid 1", (int)InpMagicNumber, 0, clrBlue);
+         if(ticket < 0)
+            Print("Error opening initial order: ", GetLastError());
+      }
+      // Open additional grid level when price drops by GridStepPoints (e.g., 50 points)
+      else
+      {
+         if(Ask <= (lowestBuyPrice - (InpGridStepPoints * Point)))
+         {
+            int ticket = OrderSend(Symbol(), OP_BUY, InpLotSize, Ask, 3, 0, 0, "HSI Grid Add", (int)InpMagicNumber, 0, clrBlue);
+            if(ticket < 0)
+               Print("Error opening grid order: ", GetLastError());
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Close all open long positions for this EA                        |
+//+------------------------------------------------------------------+
+void CloseAllLongPositions()
+{
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
+      {
+         if(OrderSymbol() == Symbol() && OrderMagicNumber() == InpMagicNumber())
+         {
+            if(OrderType() == OP_BUY)
+            {
+               bool closed = OrderClose(OrderTicket(), OrderLots(), Bid, 3, clrRed);
+               if(!closed)
+                  Print("Failed to close order #", OrderTicket(), " Error: ", GetLastError());
+            }
+         }
+      }
+   }
+}
