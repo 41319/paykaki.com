@@ -3,26 +3,17 @@
 //+------------------------------------------------------------------+
 #property strict
 
-//--- Input Parameters (Initial Defaults)
-input double InpLotSize             = 0.02;      // Lot Size per order
-input int    InpMaxOrders           = 10;        // Maximum number of orders
-input int    InpGridStep            = 500;       // Grid Step (in points)
-input double InpMinProfitActivate   = 2.0;       // Min Profit ($) to start time-trail
-input int    InpStagnationSeconds   = 300;       // Time (seconds) without a new profit high to close (e.g. 300 = 5 mins)
-input int    InpMagicNumber         = 888124;    // Magic Number
-input int    InpSlippage            = 10;        // Slippage (in points)
+//--- Input Parameters
+extern double   InpLotSize             = 0.02;      // Lot Size per order
+extern int      InpMaxOrders           = 10;        // Maximum number of orders
+extern int      InpGridStep            = 500;       // Grid Step (in points)
+extern double   InpMinProfitActivate   = 2.0;       // Min Profit ($) to start time-trail
+extern int      InpStagnationSeconds   = 300;       // Time (seconds) without a new profit high to close (e.g. 300 = 5 mins)
+extern int      InpMagicNumber         = 888124;    // Magic Number
+extern int      InpSlippage            = 10;        // Slippage (in points)
 
-//--- Dynamic Working Variables
-double g_LotSize             = InpLotSize;
-int    g_MaxOrders           = InpMaxOrders;
-int    g_GridStep            = InpGridStep;
-double g_MinProfitActivate   = InpMinProfitActivate;
-int    g_StagnationSeconds   = InpStagnationSeconds;
-int    g_MagicNumber         = InpMagicNumber;
-int    g_Slippage            = InpSlippage;
-
-datetime lastFileReadTime    = 0;
-string   configFileName      = "HSI_Settings.txt";
+//--- Dynamic File Reader Tracker
+datetime lastFileReadTime = 0;
 
 //--- Global Tracking Arrays
 int      trackTickets[100];
@@ -65,7 +56,7 @@ void OnTick()
      {
       if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
         {
-         if(OrderSymbol() == Symbol() && OrderMagicNumber() == g_MagicNumber && OrderType() == OP_BUY)
+         if(OrderSymbol() == Symbol() && OrderMagicNumber() == InpMagicNumber && OrderType() == OP_BUY)
            {
             orderCount++;
             
@@ -87,11 +78,11 @@ void OnTick()
       // Open initial order if no orders exist
       OpenBuyOrder();
      }
-   else if(orderCount < g_MaxOrders)
+   else if(orderCount < InpMaxOrders)
      {
       // Check if price dropped enough to open the next grid level
       RefreshRates();
-      if(Ask <= (lowestBuyPrice - (g_GridStep * Point)))
+      if(Ask <= (lowestBuyPrice - (InpGridStep * Point)))
         {
          OpenBuyOrder();
         }
@@ -103,6 +94,7 @@ void OnTick()
 //+------------------------------------------------------------------+
 void ReadParametersFromFile()
   {
+   string configFileName = "HSI_Settings.txt";
    if(!FileIsExist(configFileName)) return;
 
    int handle = FileOpen(configFileName, FILE_READ | FILE_TXT);
@@ -121,13 +113,13 @@ void ReadParametersFromFile()
             StringTrimLeft(key); StringTrimRight(key);
             StringTrimLeft(value); StringTrimRight(value);
 
-            if(key == "InpLotSize" || key == "LotSize")                         g_LotSize = StringToDouble(value);
-            else if(key == "InpMaxOrders" || key == "MaxOrders")               g_MaxOrders = (int)StringToInteger(value);
-            else if(key == "InpGridStep" || key == "GridStep")                 g_GridStep = (int)StringToInteger(value);
-            else if(key == "InpMinProfitActivate" || key == "MinProfit")       g_MinProfitActivate = StringToDouble(value);
-            else if(key == "InpStagnationSeconds" || key == "StagnationSec")   g_StagnationSeconds = (int)StringToInteger(value);
-            else if(key == "InpMagicNumber" || key == "MagicNumber")           g_MagicNumber = (int)StringToInteger(value);
-            else if(key == "InpSlippage" || key == "Slippage")                 g_Slippage = (int)StringToInteger(value);
+            if(key == "InpLotSize")                       InpLotSize = StringToDouble(value);
+            else if(key == "InpMaxOrders")               InpMaxOrders = (int)StringToInteger(value);
+            else if(key == "InpGridStep")                InpGridStep = (int)StringToInteger(value);
+            else if(key == "InpMinProfitActivate")       InpMinProfitActivate = StringToDouble(value);
+            else if(key == "InpStagnationSeconds")       InpStagnationSeconds = (int)StringToInteger(value);
+            else if(key == "InpMagicNumber")             InpMagicNumber = (int)StringToInteger(value);
+            else if(key == "InpSlippage")                InpSlippage = (int)StringToInteger(value);
            }
         }
       FileClose(handle);
@@ -160,9 +152,9 @@ void ProcessOrderStagnation(int ticket)
          else
            {
             // Profit has not exceeded the max. Check if it's currently in profit and if time expired.
-            if(currentProfit >= g_MinProfitActivate)
+            if(currentProfit >= InpMinProfitActivate)
               {
-               if((TimeCurrent() - trackTimeMax[j]) >= g_StagnationSeconds)
+               if((TimeCurrent() - trackTimeMax[j]) >= InpStagnationSeconds)
                  {
                   Print("Order #", ticket, " closing due to profit stagnation. Profit: ", currentProfit);
                   CloseOrder(ticket);
@@ -218,7 +210,7 @@ void OpenBuyOrder()
   {
    RefreshRates();
    double ask = MarketInfo(Symbol(), MODE_ASK);
-   int ticket = OrderSend(Symbol(), OP_BUY, g_LotSize, ask, g_Slippage, 0, 0, "HSI Time Trail", g_MagicNumber, 0, clrBlue);
+   int ticket = OrderSend(Symbol(), OP_BUY, InpLotSize, ask, InpSlippage, 0, 0, "HSI Time Trail", InpMagicNumber, 0, clrBlue);
    
    if(ticket < 0)
      {
@@ -235,7 +227,7 @@ void CloseOrder(int ticket)
      {
       RefreshRates();
       double bid = MarketInfo(Symbol(), MODE_BID);
-      bool res = OrderClose(ticket, OrderLots(), bid, g_Slippage, clrRed);
+      bool res = OrderClose(ticket, OrderLots(), bid, InpSlippage, clrRed);
       if(!res)
         {
          Print("Error closing order #", ticket, " : ", GetLastError());
