@@ -1,65 +1,33 @@
 //+------------------------------------------------------------------+
-//|                                       HSI_Time_Trailing_Grid.mq4 |
+//|                                      HSI_Time_Trailing_Grid.mq4  |
 //+------------------------------------------------------------------+
 #property strict
 
-//--- External Parameters
-extern double InpLotSize             = 0.02;      // Lot Size per order
-extern int    InpMaxOrders           = 10;        // Base Maximum orders
-extern int    InpGridStep            = 500;       // Base Grid Step (in points)
-extern double InpMinProfitActivate   = 2.0;       // Min Profit ($) to start time-trail
-extern int    InpStagnationSeconds   = 300;       // Stagnation Time (seconds)
-extern int    InpMagicNumber         = 888124;    // Magic Number
-extern int    InpSlippage            = 10;        // Slippage (in points)
+//--- Input Parameters (Initial Defaults)
+input double InpLotSize             = 0.02;      // Lot Size per order
+input int    InpMaxOrders           = 10;        // Maximum number of orders
+input int    InpGridStep            = 500;       // Grid Step (in points)
+input double InpMinProfitActivate   = 2.0;       // Min Profit ($) to start time-trail
+input int    InpStagnationSeconds   = 300;       // Time (seconds) without a new profit high to close (e.g. 300 = 5 mins)
+input int    InpMagicNumber         = 888124;    // Magic Number
+input int    InpSlippage            = 10;        // Slippage (in points)
 
-//--- Dynamic Margin Management Parameters
-extern bool   InpUseDynamicMargin    = true;      // Enable margin-based adjustments
-extern double InpMarginLevelHigh     = 800.0;     // Margin Level (%) threshold: Safe
-extern double InpMarginLevelMid      = 400.0;     // Margin Level (%) threshold: Warning
-extern double InpMarginLevelLow      = 200.0;     // Margin Level (%) threshold: Danger
+//--- Dynamic Working Variables
+double g_LotSize             = InpLotSize;
+int    g_MaxOrders           = InpMaxOrders;
+int    g_GridStep            = InpGridStep;
+double g_MinProfitActivate   = InpMinProfitActivate;
+int    g_StagnationSeconds   = InpStagnationSeconds;
+int    g_MagicNumber         = InpMagicNumber;
+int    g_Slippage            = InpSlippage;
+
+datetime lastFileReadTime    = 0;
+string   configFileName      = "HSI_Settings.txt";
 
 //--- Global Tracking Arrays
 int      trackTickets[100];
 double   trackMaxProfit[100];
 datetime trackTimeMax[100];
-
-//+------------------------------------------------------------------+
-//| Dynamic Margin Adaptation Function                               |
-//+------------------------------------------------------------------+
-void AdjustByMargin()
-  {
-   if(!InpUseDynamicMargin) return;
-
-   // If no open trades exist yet, MarginLevel returns 0; keep base settings
-   if(AccountMargin() == 0) return;
-
-   double marginLevel = AccountInfoDouble(ACCOUNT_MARGIN_LEVEL);
-
-   // Tier 1: High Margin (Safe Zone) -> Standard spacing and full order capacity
-   if(marginLevel >= InpMarginLevelHigh)
-     {
-      InpGridStep  = 500;
-      InpMaxOrders = 10;
-     }
-   // Tier 2: Medium Margin (Warning Zone) -> Widen grid by 50%, reduce order count
-   else if(marginLevel >= InpMarginLevelMid && marginLevel < InpMarginLevelHigh)
-     {
-      InpGridStep  = 750;
-      InpMaxOrders = 6;
-     }
-   // Tier 3: Low Margin (Caution Zone) -> Double grid distance, cap orders strictly
-   else if(marginLevel >= InpMarginLevelLow && marginLevel < InpMarginLevelMid)
-     {
-      InpGridStep  = 1000;
-      InpMaxOrders = 4;
-     }
-   // Tier 4: Critical Margin (Danger Zone) -> Ultra wide grid, prevent new orders
-   else if(marginLevel < InpMarginLevelLow)
-     {
-      InpGridStep  = 1500;
-      InpMaxOrders = 0; // Freezes new grid entries entirely
-     }
-  }
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -69,6 +37,8 @@ int OnInit()
    ArrayInitialize(trackTickets, 0);
    ArrayInitialize(trackMaxProfit, 0.0);
    ArrayInitialize(trackTimeMax, 0);
+   
+   ReadParametersFromFile(); // Initial read
    return(INIT_SUCCEEDED);
   }
 
@@ -77,21 +47,25 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnTick()
   {
+   // Check and update parameters every 5 minutes (300 seconds)
+   if(TimeCurrent() - lastFileReadTime >= 300)
+     {
+      ReadParametersFromFile();
+      lastFileReadTime = TimeCurrent();
+     }
+
    // 1. Remove closed orders from our tracking arrays
    CleanupTrackers();
-
-   // 2. Adjust Grid Step and Max Orders dynamically based on Margin Level
-   AdjustByMargin();
 
    int orderCount = 0;
    double lowestBuyPrice = 0;
 
-   // 3. Process open orders for Time-Based Trailing Profit & count grid
+   // 2. Process open orders for Time-Based Trailing Profit & count grid
    for(int i = OrdersTotal() - 1; i >= 0; i--)
      {
       if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
         {
-         if(OrderSymbol() == Symbol() && OrderMagicNumber() == InpMagicNumber && OrderType() == OP_BUY)
+         if(OrderSymbol() == Symbol() && OrderMagicNumber() == g_MagicNumber && OrderType() == OP_BUY)
            {
             orderCount++;
             
@@ -107,18 +81,56 @@ void OnTick()
         }
      }
 
-   // 4. Open new grid orders based on dynamically adjusted parameters
-   if(orderCount == 0 && InpMaxOrders > 0)
+   // 3. Open new grid orders
+   if(orderCount == 0)
      {
+      // Open initial order if no orders exist
       OpenBuyOrder();
      }
-   else if(orderCount < InpMaxOrders)
+   else if(orderCount < g_MaxOrders)
      {
+      // Check if price dropped enough to open the next grid level
       RefreshRates();
-      if(Ask <= (lowestBuyPrice - (InpGridStep * Point)))
+      if(Ask <= (lowestBuyPrice - (g_GridStep * Point)))
         {
          OpenBuyOrder();
         }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Function to read parameters from file                            |
+//+------------------------------------------------------------------+
+void ReadParametersFromFile()
+  {
+   if(!FileIsExist(configFileName)) return;
+
+   int handle = FileOpen(configFileName, FILE_READ | FILE_TXT);
+   if(handle != INVALID_HANDLE)
+     {
+      while(!FileIsEnding(handle))
+        {
+         string line = FileReadString(handle);
+         string parts[];
+         int numParts = StringSplit(line, '=', parts);
+         
+         if(numParts == 2)
+           {
+            string key = parts[0];
+            string value = parts[1];
+            StringTrimLeft(key); StringTrimRight(key);
+            StringTrimLeft(value); StringTrimRight(value);
+
+            if(key == "InpLotSize" || key == "LotSize")                         g_LotSize = StringToDouble(value);
+            else if(key == "InpMaxOrders" || key == "MaxOrders")               g_MaxOrders = (int)StringToInteger(value);
+            else if(key == "InpGridStep" || key == "GridStep")                 g_GridStep = (int)StringToInteger(value);
+            else if(key == "InpMinProfitActivate" || key == "MinProfit")       g_MinProfitActivate = StringToDouble(value);
+            else if(key == "InpStagnationSeconds" || key == "StagnationSec")   g_StagnationSeconds = (int)StringToInteger(value);
+            else if(key == "InpMagicNumber" || key == "MagicNumber")           g_MagicNumber = (int)StringToInteger(value);
+            else if(key == "InpSlippage" || key == "Slippage")                 g_Slippage = (int)StringToInteger(value);
+           }
+        }
+      FileClose(handle);
      }
   }
 
@@ -132,12 +144,14 @@ void ProcessOrderStagnation(int ticket)
    double currentProfit = OrderProfit() + OrderSwap() + OrderCommission();
    bool found = false;
 
+   // Search for ticket in our tracking array
    for(int j = 0; j < 100; j++)
      {
       if(trackTickets[j] == ticket)
         {
          found = true;
          
+         // If we hit a new highest profit, update the max profit and reset the timer
          if(currentProfit > trackMaxProfit[j])
            {
             trackMaxProfit[j] = currentProfit;
@@ -145,13 +159,14 @@ void ProcessOrderStagnation(int ticket)
            }
          else
            {
-            if(currentProfit >= InpMinProfitActivate)
+            // Profit has not exceeded the max. Check if it's currently in profit and if time expired.
+            if(currentProfit >= g_MinProfitActivate)
               {
-               if((TimeCurrent() - trackTimeMax[j]) >= InpStagnationSeconds)
+               if((TimeCurrent() - trackTimeMax[j]) >= g_StagnationSeconds)
                  {
                   Print("Order #", ticket, " closing due to profit stagnation. Profit: ", currentProfit);
                   CloseOrder(ticket);
-                  trackTickets[j] = 0;
+                  trackTickets[j] = 0; // Free the slot
                  }
               }
            }
@@ -159,6 +174,7 @@ void ProcessOrderStagnation(int ticket)
         }
      }
 
+   // If ticket wasn't found in tracker, add it
    if(!found)
      {
       for(int j = 0; j < 100; j++)
@@ -185,11 +201,11 @@ void CleanupTrackers()
         {
          if(!OrderSelect(trackTickets[j], SELECT_BY_TICKET))
            {
-            trackTickets[j] = 0;
+            trackTickets[j] = 0; // Order no longer exists
            }
          else if(OrderCloseTime() != 0)
            {
-            trackTickets[j] = 0;
+            trackTickets[j] = 0; // Order is closed
            }
         }
      }
@@ -202,7 +218,7 @@ void OpenBuyOrder()
   {
    RefreshRates();
    double ask = MarketInfo(Symbol(), MODE_ASK);
-   int ticket = OrderSend(Symbol(), OP_BUY, InpLotSize, ask, InpSlippage, 0, 0, "HSI Time Trail", InpMagicNumber, 0, clrBlue);
+   int ticket = OrderSend(Symbol(), OP_BUY, g_LotSize, ask, g_Slippage, 0, 0, "HSI Time Trail", g_MagicNumber, 0, clrBlue);
    
    if(ticket < 0)
      {
@@ -219,7 +235,7 @@ void CloseOrder(int ticket)
      {
       RefreshRates();
       double bid = MarketInfo(Symbol(), MODE_BID);
-      bool res = OrderClose(ticket, OrderLots(), bid, InpSlippage, clrRed);
+      bool res = OrderClose(ticket, OrderLots(), bid, g_Slippage, clrRed);
       if(!res)
         {
          Print("Error closing order #", ticket, " : ", GetLastError());
