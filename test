@@ -3,22 +3,14 @@
 //+------------------------------------------------------------------+
 #property strict
 
-//--- Input Parameters (Initial Defaults)
-input double InpLotSize             = 0.02;      // Initial Lot Size per order
-input int    InpMaxOrders           = 10;        // Initial Maximum number of orders
-input int    InpGridStep            = 500;       // Initial Grid Step (in points)
-input double InpMinProfitActivate   = 2.0;       // Initial Min Profit ($) to start time-trail
-input int    InpStagnationSeconds   = 300;       // Initial Time (seconds) without profit high
-input int    InpMagicNumber         = 888124;    // Magic Number
-input int    InpSlippage            = 10;        // Slippage (in points)
-
-//--- Working Variables (Modifiable at runtime)
-double g_LotSize;
-int    g_MaxOrders;
-int    g_GridStep;
-double g_MinProfitActivate;
-int    g_StagnationSeconds;
-int    g_Slippage;
+//--- External Parameters (Editable in Settings & Modifiable at Runtime)
+extern double InpLotSize             = 0.02;      // Lot Size per order
+extern int    InpMaxOrders           = 10;        // Maximum number of orders
+extern int    InpGridStep            = 500;       // Grid Step (in points)
+extern double InpMinProfitActivate   = 2.0;       // Min Profit ($) to start time-trail
+extern int    InpStagnationSeconds   = 300;       // Time (seconds) without a new profit high to close
+extern int    InpMagicNumber         = 888124;    // Magic Number
+extern int    InpSlippage            = 10;        // Slippage (in points)
 
 //--- Global Tracking Arrays
 int      trackTickets[100];
@@ -26,48 +18,40 @@ double   trackMaxProfit[100];
 datetime trackTimeMax[100];
 
 //+------------------------------------------------------------------+
+//| Function to alter the variables directly                         |
+//| Pass -1 (or -1.0) for parameters you don't want to change        |
+//+------------------------------------------------------------------+
+void UpdateVariables(double newLotSize = -1.0, 
+                     int newMaxOrders = -1, 
+                     int newGridStep = -1, 
+                     double newMinProfit = -1.0, 
+                     int newStagnationSec = -1, 
+                     int newSlippage = -1)
+  {
+   if(newLotSize > 0)          InpLotSize = newLotSize;
+   if(newMaxOrders > 0)        InpMaxOrders = newMaxOrders;
+   if(newGridStep > 0)         InpGridStep = newGridStep;
+   if(newMinProfit >= 0)       InpMinProfitActivate = newMinProfit;
+   if(newStagnationSec > 0)    InpStagnationSeconds = newStagnationSec;
+   if(newSlippage >= 0)        InpSlippage = newSlippage;
+
+   Print("Variables updated: LotSize=", InpLotSize, 
+         ", MaxOrders=", InpMaxOrders, 
+         ", GridStep=", InpGridStep, 
+         ", MinProfit=", InpMinProfitActivate, 
+         ", StagnationSec=", InpStagnationSeconds, 
+         ", Slippage=", InpSlippage);
+  }
+
+//+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
 int OnInit()
   {
-   // Initialize working variables with input defaults
-   g_LotSize            = InpLotSize;
-   g_MaxOrders          = InpMaxOrders;
-   g_GridStep           = InpGridStep;
-   g_MinProfitActivate  = InpMinProfitActivate;
-   g_StagnationSeconds  = InpStagnationSeconds;
-   g_Slippage           = InpSlippage;
-
    ArrayInitialize(trackTickets, 0);
    ArrayInitialize(trackMaxProfit, 0.0);
    ArrayInitialize(trackTimeMax, 0);
    return(INIT_SUCCEEDED);
-  }
-
-//+------------------------------------------------------------------+
-//| Function to alter operational variables dynamically              |
-//| Pass -1 (or -1.0) for any parameter you wish to keep unchanged   |
-//+------------------------------------------------------------------+
-void UpdateParameters(double newLotSize = -1.0, 
-                      int newMaxOrders = -1, 
-                      int newGridStep = -1, 
-                      double newMinProfit = -1.0, 
-                      int newStagnationSec = -1, 
-                      int newSlippage = -1)
-  {
-   if(newLotSize > 0)          g_LotSize = newLotSize;
-   if(newMaxOrders > 0)        g_MaxOrders = newMaxOrders;
-   if(newGridStep > 0)         g_GridStep = newGridStep;
-   if(newMinProfit >= 0)       g_MinProfitActivate = newMinProfit;
-   if(newStagnationSec > 0)    g_StagnationSeconds = newStagnationSec;
-   if(newSlippage >= 0)        g_Slippage = newSlippage;
-
-   Print("Parameters updated: LotSize=", g_LotSize, 
-         ", MaxOrders=", g_MaxOrders, 
-         ", GridStep=", g_GridStep, 
-         ", MinProfit=", g_MinProfitActivate, 
-         ", StagnationSec=", g_StagnationSeconds, 
-         ", Slippage=", g_Slippage);
   }
 
 //+------------------------------------------------------------------+
@@ -105,12 +89,14 @@ void OnTick()
    // 3. Open new grid orders
    if(orderCount == 0)
      {
+      // Open initial order if no orders exist
       OpenBuyOrder();
      }
-   else if(orderCount < g_MaxOrders)
+   else if(orderCount < InpMaxOrders)
      {
+      // Check if price dropped enough to open the next grid level
       RefreshRates();
-      if(Ask <= (lowestBuyPrice - (g_GridStep * Point)))
+      if(Ask <= (lowestBuyPrice - (InpGridStep * Point)))
         {
          OpenBuyOrder();
         }
@@ -127,12 +113,14 @@ void ProcessOrderStagnation(int ticket)
    double currentProfit = OrderProfit() + OrderSwap() + OrderCommission();
    bool found = false;
 
+   // Search for ticket in our tracking array
    for(int j = 0; j < 100; j++)
      {
       if(trackTickets[j] == ticket)
         {
          found = true;
          
+         // If we hit a new highest profit, update the max profit and reset the timer
          if(currentProfit > trackMaxProfit[j])
            {
             trackMaxProfit[j] = currentProfit;
@@ -140,13 +128,14 @@ void ProcessOrderStagnation(int ticket)
            }
          else
            {
-            if(currentProfit >= g_MinProfitActivate)
+            // Profit has not exceeded the max. Check if it's currently in profit and if time expired.
+            if(currentProfit >= InpMinProfitActivate)
               {
-               if((TimeCurrent() - trackTimeMax[j]) >= g_StagnationSeconds)
+               if((TimeCurrent() - trackTimeMax[j]) >= InpStagnationSeconds)
                  {
                   Print("Order #", ticket, " closing due to profit stagnation. Profit: ", currentProfit);
                   CloseOrder(ticket);
-                  trackTickets[j] = 0;
+                  trackTickets[j] = 0; // Free the slot
                  }
               }
            }
@@ -154,6 +143,7 @@ void ProcessOrderStagnation(int ticket)
         }
      }
 
+   // If ticket wasn't found in tracker, add it
    if(!found)
      {
       for(int j = 0; j < 100; j++)
@@ -180,11 +170,11 @@ void CleanupTrackers()
         {
          if(!OrderSelect(trackTickets[j], SELECT_BY_TICKET))
            {
-            trackTickets[j] = 0;
+            trackTickets[j] = 0; // Order no longer exists
            }
          else if(OrderCloseTime() != 0)
            {
-            trackTickets[j] = 0;
+            trackTickets[j] = 0; // Order is closed
            }
         }
      }
@@ -197,7 +187,7 @@ void OpenBuyOrder()
   {
    RefreshRates();
    double ask = MarketInfo(Symbol(), MODE_ASK);
-   int ticket = OrderSend(Symbol(), OP_BUY, g_LotSize, ask, g_Slippage, 0, 0, "HSI Time Trail", InpMagicNumber, 0, clrBlue);
+   int ticket = OrderSend(Symbol(), OP_BUY, InpLotSize, ask, InpSlippage, 0, 0, "HSI Time Trail", InpMagicNumber, 0, clrBlue);
    
    if(ticket < 0)
      {
@@ -214,7 +204,7 @@ void CloseOrder(int ticket)
      {
       RefreshRates();
       double bid = MarketInfo(Symbol(), MODE_BID);
-      bool res = OrderClose(ticket, OrderLots(), bid, g_Slippage, clrRed);
+      bool res = OrderClose(ticket, OrderLots(), bid, InpSlippage, clrRed);
       if(!res)
         {
          Print("Error closing order #", ticket, " : ", GetLastError());
