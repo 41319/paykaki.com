@@ -3,28 +3,22 @@
 //+------------------------------------------------------------------+
 #property strict
 
-//--- Input Parameters
-input string InpFileName            = "grid_settings.txt"; // Config file in MQL4/Files/
-input double InpDefaultLotSize      = 0.02;                // Fallback Lot Size per order
-input int    InpDefaultMaxOrders    = 10;                  // Fallback Maximum number of orders
-input int    InpDefaultGridStep     = 500;                 // Fallback Grid Step (in points)
-input double InpDefaultMinProfitAct = 2.0;                  // Fallback Min Profit ($)
-input int    InpDefaultStagnationSec= 300;                 // Fallback Stagnation Seconds
-input int    InpDefaultMagicNumber  = 888124;              // Fallback Magic Number
-input int    InpDefaultSlippage     = 10;                  // Fallback Slippage (in points)
+//--- Input Parameters (Initial Defaults)
+input double InpLotSize             = 0.02;      // Initial Lot Size per order
+input int    InpMaxOrders           = 10;        // Initial Maximum number of orders
+input int    InpGridStep            = 500;       // Initial Grid Step (in points)
+input double InpMinProfitActivate   = 2.0;       // Initial Min Profit ($) to start time-trail
+input int    InpStagnationSeconds   = 300;       // Initial Time (seconds) without profit high
+input int    InpMagicNumber         = 888124;    // Magic Number
+input int    InpSlippage            = 10;        // Slippage (in points)
 
-//--- Working Variables (Loaded from file or default)
-double LotSize;
-int    MaxOrders;
-int    GridStep;
-double MinProfitActivate;
-int    StagnationSeconds;
-int    MagicNumber;
-int    Slippage;
-
-//--- Timer Tracking
-datetime lastConfigReadTime = 0;
-const int CONFIG_RELOAD_INTERVAL = 300; // 300 seconds = 5 minutes
+//--- Working Variables (Modifiable at runtime)
+double g_LotSize;
+int    g_MaxOrders;
+int    g_GridStep;
+double g_MinProfitActivate;
+int    g_StagnationSeconds;
+int    g_Slippage;
 
 //--- Global Tracking Arrays
 int      trackTickets[100];
@@ -36,15 +30,44 @@ datetime trackTimeMax[100];
 //+------------------------------------------------------------------+
 int OnInit()
   {
+   // Initialize working variables with input defaults
+   g_LotSize            = InpLotSize;
+   g_MaxOrders          = InpMaxOrders;
+   g_GridStep           = InpGridStep;
+   g_MinProfitActivate  = InpMinProfitActivate;
+   g_StagnationSeconds  = InpStagnationSeconds;
+   g_Slippage           = InpSlippage;
+
    ArrayInitialize(trackTickets, 0);
    ArrayInitialize(trackMaxProfit, 0.0);
    ArrayInitialize(trackTimeMax, 0);
-
-   // Initial file read
-   LoadSettingsFromFile(InpFileName);
-   lastConfigReadTime = TimeCurrent();
-
    return(INIT_SUCCEEDED);
+  }
+
+//+------------------------------------------------------------------+
+//| Function to alter operational variables dynamically              |
+//| Pass -1 (or -1.0) for any parameter you wish to keep unchanged   |
+//+------------------------------------------------------------------+
+void UpdateParameters(double newLotSize = -1.0, 
+                      int newMaxOrders = -1, 
+                      int newGridStep = -1, 
+                      double newMinProfit = -1.0, 
+                      int newStagnationSec = -1, 
+                      int newSlippage = -1)
+  {
+   if(newLotSize > 0)          g_LotSize = newLotSize;
+   if(newMaxOrders > 0)        g_MaxOrders = newMaxOrders;
+   if(newGridStep > 0)         g_GridStep = newGridStep;
+   if(newMinProfit >= 0)       g_MinProfitActivate = newMinProfit;
+   if(newStagnationSec > 0)    g_StagnationSeconds = newStagnationSec;
+   if(newSlippage >= 0)        g_Slippage = newSlippage;
+
+   Print("Parameters updated: LotSize=", g_LotSize, 
+         ", MaxOrders=", g_MaxOrders, 
+         ", GridStep=", g_GridStep, 
+         ", MinProfit=", g_MinProfitActivate, 
+         ", StagnationSec=", g_StagnationSeconds, 
+         ", Slippage=", g_Slippage);
   }
 
 //+------------------------------------------------------------------+
@@ -52,13 +75,6 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnTick()
   {
-   // 0. Re-read config file every 5 minutes (300 seconds)
-   if(TimeCurrent() - lastConfigReadTime >= CONFIG_RELOAD_INTERVAL)
-     {
-      LoadSettingsFromFile(InpFileName);
-      lastConfigReadTime = TimeCurrent();
-     }
-
    // 1. Remove closed orders from our tracking arrays
    CleanupTrackers();
 
@@ -70,7 +86,7 @@ void OnTick()
      {
       if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
         {
-         if(OrderSymbol() == Symbol() && OrderMagicNumber() == MagicNumber && OrderType() == OP_BUY)
+         if(OrderSymbol() == Symbol() && OrderMagicNumber() == InpMagicNumber && OrderType() == OP_BUY)
            {
             orderCount++;
             
@@ -91,74 +107,14 @@ void OnTick()
      {
       OpenBuyOrder();
      }
-   else if(orderCount < MaxOrders)
+   else if(orderCount < g_MaxOrders)
      {
       RefreshRates();
-      if(Ask <= (lowestBuyPrice - (GridStep * Point)))
+      if(Ask <= (lowestBuyPrice - (g_GridStep * Point)))
         {
          OpenBuyOrder();
         }
      }
-  }
-
-//+------------------------------------------------------------------+
-//| Function to load key=value pairs from text file                  |
-//+------------------------------------------------------------------+
-void LoadSettingsFromFile(string filename)
-  {
-   // Set fallbacks first if not yet assigned
-   if(LotSize == 0)
-     {
-      LotSize            = InpDefaultLotSize;
-      MaxOrders          = InpDefaultMaxOrders;
-      GridStep           = InpDefaultGridStep;
-      MinProfitActivate  = InpDefaultMinProfitAct;
-      StagnationSeconds  = InpDefaultStagnationSec;
-      MagicNumber        = InpDefaultMagicNumber;
-      Slippage           = InpDefaultSlippage;
-     }
-
-   int fileHandle = FileOpen(filename, FILE_READ | FILE_TXT);
-   if(fileHandle == INVALID_HANDLE)
-     {
-      Print("Settings file '", filename, "' not found in MQL4/Files. Using current/default settings.");
-      return;
-     }
-
-   while(!FileIsEnding(fileHandle))
-     {
-      string line = FileReadString(fileHandle);
-      StringTrimLeft(line);
-      StringTrimRight(line);
-
-      // Skip comments or blank lines
-      if(line == "" || StringSubstr(line, 0, 2) == "//" || StringSubstr(line, 0, 1) == "#")
-         continue;
-
-      int separatorPos = StringFind(line, "=");
-      if(separatorPos > 0)
-        {
-         string key = StringSubstr(line, 0, separatorPos);
-         string val = StringSubstr(line, separatorPos + 1);
-
-         StringTrimLeft(key);
-         StringTrimRight(key);
-         StringTrimLeft(val);
-         StringTrimRight(val);
-
-         if(key == "LotSize")                 LotSize = StringToDouble(val);
-         else if(key == "MaxOrders")          MaxOrders = (int)StringToInteger(val);
-         else if(key == "GridStep")           GridStep = (int)StringToInteger(val);
-         else if(key == "MinProfitActivate")  MinProfitActivate = StringToDouble(val);
-         else if(key == "StagnationSeconds")  StagnationSeconds = (int)StringToInteger(val);
-         else if(key == "MagicNumber")        MagicNumber = (int)StringToInteger(val);
-         else if(key == "Slippage")           Slippage = (int)StringToInteger(val);
-        }
-     }
-
-   FileClose(fileHandle);
-   PrintFormat("Config reloaded (5m interval): LotSize=%.2f, MaxOrders=%d, GridStep=%d, MinProfit=%.2f, StagnationSec=%d, Magic=%d",
-               LotSize, MaxOrders, GridStep, MinProfitActivate, StagnationSeconds, MagicNumber);
   }
 
 //+------------------------------------------------------------------+
@@ -184,9 +140,9 @@ void ProcessOrderStagnation(int ticket)
            }
          else
            {
-            if(currentProfit >= MinProfitActivate)
+            if(currentProfit >= g_MinProfitActivate)
               {
-               if((TimeCurrent() - trackTimeMax[j]) >= StagnationSeconds)
+               if((TimeCurrent() - trackTimeMax[j]) >= g_StagnationSeconds)
                  {
                   Print("Order #", ticket, " closing due to profit stagnation. Profit: ", currentProfit);
                   CloseOrder(ticket);
@@ -241,7 +197,7 @@ void OpenBuyOrder()
   {
    RefreshRates();
    double ask = MarketInfo(Symbol(), MODE_ASK);
-   int ticket = OrderSend(Symbol(), OP_BUY, LotSize, ask, Slippage, 0, 0, "HSI Time Trail", MagicNumber, 0, clrBlue);
+   int ticket = OrderSend(Symbol(), OP_BUY, g_LotSize, ask, g_Slippage, 0, 0, "HSI Time Trail", InpMagicNumber, 0, clrBlue);
    
    if(ticket < 0)
      {
@@ -258,10 +214,11 @@ void CloseOrder(int ticket)
      {
       RefreshRates();
       double bid = MarketInfo(Symbol(), MODE_BID);
-      bool res = OrderClose(ticket, OrderLots(), bid, Slippage, clrRed);
+      bool res = OrderClose(ticket, OrderLots(), bid, g_Slippage, clrRed);
       if(!res)
         {
          Print("Error closing order #", ticket, " : ", GetLastError());
         }
      }
   }
+//+------------------------------------------------------------------+
