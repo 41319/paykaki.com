@@ -3,14 +3,20 @@
 //+------------------------------------------------------------------+
 #property strict
 
-//--- External Parameters (Editable in Settings & Modifiable at Runtime)
+//--- External Parameters
 extern double InpLotSize             = 0.02;      // Lot Size per order
-extern int    InpMaxOrders           = 10;        // Maximum number of orders
-extern int    InpGridStep            = 500;       // Grid Step (in points)
+extern int    InpMaxOrders           = 10;        // Base Maximum orders
+extern int    InpGridStep            = 500;       // Base Grid Step (in points)
 extern double InpMinProfitActivate   = 2.0;       // Min Profit ($) to start time-trail
-extern int    InpStagnationSeconds   = 300;       // Time (seconds) without a new profit high to close
+extern int    InpStagnationSeconds   = 300;       // Stagnation Time (seconds)
 extern int    InpMagicNumber         = 888124;    // Magic Number
 extern int    InpSlippage            = 10;        // Slippage (in points)
+
+//--- Dynamic Margin Management Parameters
+extern bool   InpUseDynamicMargin    = true;      // Enable margin-based adjustments
+extern double InpMarginLevelHigh     = 800.0;     // Margin Level (%) threshold: Safe
+extern double InpMarginLevelMid      = 400.0;     // Margin Level (%) threshold: Warning
+extern double InpMarginLevelLow      = 200.0;     // Margin Level (%) threshold: Danger
 
 //--- Global Tracking Arrays
 int      trackTickets[100];
@@ -18,29 +24,41 @@ double   trackMaxProfit[100];
 datetime trackTimeMax[100];
 
 //+------------------------------------------------------------------+
-//| Function to alter the variables directly                         |
-//| Pass -1 (or -1.0) for parameters you don't want to change        |
+//| Dynamic Margin Adaptation Function                               |
 //+------------------------------------------------------------------+
-void UpdateVariables(double newLotSize = -1.0, 
-                     int newMaxOrders = -1, 
-                     int newGridStep = -1, 
-                     double newMinProfit = -1.0, 
-                     int newStagnationSec = -1, 
-                     int newSlippage = -1)
+void AdjustByMargin()
   {
-   if(newLotSize > 0)          InpLotSize = newLotSize;
-   if(newMaxOrders > 0)        InpMaxOrders = newMaxOrders;
-   if(newGridStep > 0)         InpGridStep = newGridStep;
-   if(newMinProfit >= 0)       InpMinProfitActivate = newMinProfit;
-   if(newStagnationSec > 0)    InpStagnationSeconds = newStagnationSec;
-   if(newSlippage >= 0)        InpSlippage = newSlippage;
+   if(!InpUseDynamicMargin) return;
 
-   Print("Variables updated: LotSize=", InpLotSize, 
-         ", MaxOrders=", InpMaxOrders, 
-         ", GridStep=", InpGridStep, 
-         ", MinProfit=", InpMinProfitActivate, 
-         ", StagnationSec=", InpStagnationSeconds, 
-         ", Slippage=", InpSlippage);
+   // If no open trades exist yet, MarginLevel returns 0; keep base settings
+   if(AccountMargin() == 0) return;
+
+   double marginLevel = AccountInfoDouble(ACCOUNT_MARGIN_LEVEL);
+
+   // Tier 1: High Margin (Safe Zone) -> Standard spacing and full order capacity
+   if(marginLevel >= InpMarginLevelHigh)
+     {
+      InpGridStep  = 500;
+      InpMaxOrders = 10;
+     }
+   // Tier 2: Medium Margin (Warning Zone) -> Widen grid by 50%, reduce order count
+   else if(marginLevel >= InpMarginLevelMid && marginLevel < InpMarginLevelHigh)
+     {
+      InpGridStep  = 750;
+      InpMaxOrders = 6;
+     }
+   // Tier 3: Low Margin (Caution Zone) -> Double grid distance, cap orders strictly
+   else if(marginLevel >= InpMarginLevelLow && marginLevel < InpMarginLevelMid)
+     {
+      InpGridStep  = 1000;
+      InpMaxOrders = 4;
+     }
+   // Tier 4: Critical Margin (Danger Zone) -> Ultra wide grid, prevent new orders
+   else if(marginLevel < InpMarginLevelLow)
+     {
+      InpGridStep  = 1500;
+      InpMaxOrders = 0; // Freezes new grid entries entirely
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -62,10 +80,13 @@ void OnTick()
    // 1. Remove closed orders from our tracking arrays
    CleanupTrackers();
 
+   // 2. Adjust Grid Step and Max Orders dynamically based on Margin Level
+   AdjustByMargin();
+
    int orderCount = 0;
    double lowestBuyPrice = 0;
 
-   // 2. Process open orders for Time-Based Trailing Profit & count grid
+   // 3. Process open orders for Time-Based Trailing Profit & count grid
    for(int i = OrdersTotal() - 1; i >= 0; i--)
      {
       if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
@@ -86,15 +107,13 @@ void OnTick()
         }
      }
 
-   // 3. Open new grid orders
-   if(orderCount == 0)
+   // 4. Open new grid orders based on dynamically adjusted parameters
+   if(orderCount == 0 && InpMaxOrders > 0)
      {
-      // Open initial order if no orders exist
       OpenBuyOrder();
      }
    else if(orderCount < InpMaxOrders)
      {
-      // Check if price dropped enough to open the next grid level
       RefreshRates();
       if(Ask <= (lowestBuyPrice - (InpGridStep * Point)))
         {
@@ -113,14 +132,12 @@ void ProcessOrderStagnation(int ticket)
    double currentProfit = OrderProfit() + OrderSwap() + OrderCommission();
    bool found = false;
 
-   // Search for ticket in our tracking array
    for(int j = 0; j < 100; j++)
      {
       if(trackTickets[j] == ticket)
         {
          found = true;
          
-         // If we hit a new highest profit, update the max profit and reset the timer
          if(currentProfit > trackMaxProfit[j])
            {
             trackMaxProfit[j] = currentProfit;
@@ -128,14 +145,13 @@ void ProcessOrderStagnation(int ticket)
            }
          else
            {
-            // Profit has not exceeded the max. Check if it's currently in profit and if time expired.
             if(currentProfit >= InpMinProfitActivate)
               {
                if((TimeCurrent() - trackTimeMax[j]) >= InpStagnationSeconds)
                  {
                   Print("Order #", ticket, " closing due to profit stagnation. Profit: ", currentProfit);
                   CloseOrder(ticket);
-                  trackTickets[j] = 0; // Free the slot
+                  trackTickets[j] = 0;
                  }
               }
            }
@@ -143,7 +159,6 @@ void ProcessOrderStagnation(int ticket)
         }
      }
 
-   // If ticket wasn't found in tracker, add it
    if(!found)
      {
       for(int j = 0; j < 100; j++)
@@ -170,11 +185,11 @@ void CleanupTrackers()
         {
          if(!OrderSelect(trackTickets[j], SELECT_BY_TICKET))
            {
-            trackTickets[j] = 0; // Order no longer exists
+            trackTickets[j] = 0;
            }
          else if(OrderCloseTime() != 0)
            {
-            trackTickets[j] = 0; // Order is closed
+            trackTickets[j] = 0;
            }
         }
      }
